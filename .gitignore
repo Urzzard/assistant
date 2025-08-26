@@ -2,3 +2,6 @@
 /backend/venv/
 
 .gitignore/
+
+/frontend/node_modules
+/frontend/build
