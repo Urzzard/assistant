@@ -1,11 +1,13 @@
 import os
+import sqlite3
 from dotenv import load_dotenv
 import google.generativeai as genai
 from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+import json
 
-# --- CONFIGURACIÓN Y HERRAMIENTAS (Como ya lo tenías) ---
+
 load_dotenv()
 from tools.file_system import list_project_files, read_file_content, write_file_content
 
@@ -21,14 +23,25 @@ model = genai.GenerativeModel(
     tools=available_tools
 )
 
+DB_NAME = "chat_history.db"
+
+def init_db():
+    con = sqlite3.connect(DB_NAME)
+    cur = con.cursor()
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL
+        )
+    ''')
+    con.commit()
+    con.close()
+
 # --- LÓGICA DEL SERVIDOR WEB CON FASTAPI ---
 
-# Creamos la aplicación FastAPI
-app = FastAPI(
-    title="Asistente de Desarrollo con Gemini",
-    description="Una API para interactuar con un agente de IA que tiene acceso a herramientas interactivas.",
-    version="0.0.1"
-)
+app = FastAPI(title="Asistente de Desarrollo con Gemini")
 
 origins = [
     "http://localhost:3000",
@@ -43,43 +56,86 @@ app.add_middleware(
 )
 
 
-# Usamos un diccionario simple para simular "sesiones" y guardar el historial de cada una.
-# La clave será un ID de sesión (p. ej., de una cookie de navegador), el valor es la lista del historial.
-chat_sessions = {} 
-
-# Pydantic nos ayuda a definir cómo deben ser los datos que llegan a nuestra API.
-# Esto nos da validación automática y una mejor documentación.
 class ChatRequest(BaseModel):
     prompt: str
-    session_id: str = "default_session" # Un ID para mantener conversaciones separadas
+    session_id: str
+
+@app.get("/history/{session_id}")
+async def get_history(session_id: str):
+    con = sqlite3.connect(DB_NAME)
+    cur = con.cursor()
+    cur.execute("SELECT role, content FROM history WHERE session_id = ? ORDER BY id ASC", (session_id,))
+    rows = cur.fetchall()
+    con.close()
+
+    history = []
+    for row in rows:
+        role = 'assistant' if row[0] == 'model' else row[0]
+        try:
+            content_data = json.loads(row[1])
+            text = content_data.get('text', '[Llamada a Herramienta]')
+        except (json.JSONDecodeError, AttributeError):
+            text = row[1]
+        history.append({'role': role, 'content': text})
+        
+    return {"history": history}
 
 # Este es nuestro "endpoint" de la API. Aquí es donde el frontend hará las peticiones.
 @app.post("/chat")
 async def handle_chat(request: ChatRequest):
-    """
-    Recibe un prompt de un usuario, lo procesa con Gemini y devuelve la respuesta.
-    Mantiene el historial de la conversación usando un session_id.
-    """
+
     session_id = request.session_id
+
+    if not session_id.strip():
+        return await get_history(session_id)
     
-    # Recupera el historial de esta sesión, o crea uno nuevo si no existe.
-    if session_id not in chat_sessions:
-        chat_sessions[session_id] = model.start_chat(enable_automatic_function_calling=True)
+    #CARGA EL HISTORIAL DE LA BD
+    con = sqlite3.connect(DB_NAME)
+    cur = con.cursor()
+    cur.execute("SELECT role, content FROM history WHERE session_id = ? ORDER BY id ASC", (session_id,))
+    rows = cur.fetchall()
+
+    history_for_gemini = []
+    for row in rows:
+        parts = json.loads(row[1])
+        history_for_gemini.append({'role': row[0], 'parts': [parts]})
     
-    chat = chat_sessions[session_id]
-    
-    # Enviamos el mensaje al modelo a través de la sesión de chat
+    chat = model.start_chat(history=history_for_gemini, enable_automatic_function_calling=True)
     response = await chat.send_message_async(request.prompt)
+
+    #Guardamos la sesion, usuario y el contenido del usuario
+    user_content = json.dumps({'text': request.prompt})
+    cur.execute("INSERT INTO history (session_id, role, content) VALUES (?, ?, ?)", 
+                (session_id, 'user', user_content))
+    
+    response_part = response.candidates[0].content.parts[0]
+    if response_part.function_call:
+        assistant_content = json.dumps(
+            {'function_call': {'name': response_part.function_call.name, 'args': dict(response_part.function_call.args)}}
+        )
+    else:
+        assistant_content = json.dumps({'text': response.text})
+        
+    cur.execute("INSERT INTO history (session_id, role, content) VALUES (?, ?, ?)", 
+                (session_id, 'model', assistant_content))
+    con.commit()
+    con.close()
     
     # Calculamos los tokens de esta interacción
-    token_count = 0
-    if response.usage_metadata:
-        token_count = response.usage_metadata.total_token_count
 
+    updated_history_data = await get_history(session_id)
+
+    token_count = response.usage_metadata.total_token_count if response.usage_metadata else 0
     return {
         "response_text": response.text,
-        "tokens_used": token_count
+        "tokens_used": token_count,
+        "history": updated_history_data["history"]
     }
+
+#SE EJECUTA CUANDO EL SERVER LO HACE
+@app.on_event("startup")
+async def startup_event():
+    init_db()
 
 # Endpoint de bienvenida para probar que el servidor funciona
 @app.get("/")

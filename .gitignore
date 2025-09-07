@@ -1,5 +1,11 @@
+.vscode/
+
+
 /backend/.env
 /backend/venv/
+/backend/chat_histories/
+/backend/chat_history.db
+
 
 .gitignore/
 

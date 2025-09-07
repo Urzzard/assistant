@@ -1,103 +1,159 @@
-import Image from "next/image";
+"use client";
+import { useState, FormEvent, useRef, useEffect } from "react";
+import ReactMarkdown from "react-markdown";
 
-export default function Home() {
+interface Message {
+  role: "user" | "assistant" | "model";
+  content: string;
+}
+
+export default function ChatPage() {
+
+  const [input, setInput] = useState<string>("");
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(false);
+
+  const [sessionId, setSessionId] = useState<string>("");
+
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+
+  const handleSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!input.trim() || !sessionId.trim()) {
+      alert("Por favor, ingresa un ID de Sesión y un mensaje.");
+      return;
+    };
+
+    const userMessage: Message = { role: "user", content: input };
+    setMessages((prevMessages) => [...prevMessages, userMessage]);
+    
+    const currentInput = input;
+    setInput("");
+    setIsLoading(true);
+
+    try {
+      const response = await fetch("http://127.0.0.1:8000/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          prompt: currentInput,
+          session_id: sessionId
+        }),
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({response_text: "Error desconocido del servidor"}));
+        const errorMessage: Message = {role: "assistant", content: `Error: ${errorData.response_text}`};
+        setMessages((prevMessages) => [...prevMessages, errorMessage]);
+        return;
+      }
+
+      const data = await response.json();
+
+      if (data.history) {
+        setMessages(data.history);
+      }
+
+    } catch (error) {
+      console.error("Hubo un error al contactar al asistente:", error);
+      const errorMessage: Message = { role: "assistant", content: "Lo siento, no pude conectarme. Revisa que el servidor backend esté funcionando." };
+      setMessages((prevMessages) => [...prevMessages, errorMessage]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Función para cargar una sesión existente al cambiar el input del Session ID
+  const handleSessionChange = async (newSessionId: string) => {
+    setSessionId(newSessionId);
+    if (!newSessionId.trim()) {
+        setMessages([]); // Limpiar mensajes si el ID de sesión está vacío
+        return;
+    }
+    // Hacemos una petición "ficticia" para cargar el historial
+    // Enviando un prompt vacío que el backend podría ignorar
+    setIsLoading(true);
+    try {
+        const response = await fetch(`http://127.0.0.1:8000/history/${newSessionId}`);
+
+        if(!response.ok){
+          setMessages([]);
+          return;
+        }
+
+        const data = await response.json();
+        if(data.history){
+          setMessages(data.history);
+        }
+        
+    } catch (e) { 
+      console.error("Error al cargar historial", e); 
+      setMessages([]);
+    }
+    finally { 
+      setIsLoading(false); 
+    }
+  }
+
   return (
-    <div className="font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
+    <div className="flex flex-col h-screen bg-gray-900 text-white">
+      {/* Área de Mensajes */}
+      <div className="p-2 border-b border-gray-700 bg-gray-800">
+        <input
+            type="text"
+            value={sessionId}
+            onChange={(e) => setSessionId(e.target.value)}
+            onBlur={(e) => handleSessionChange(e.target.value)}
+            placeholder="Escribe un ID de Sesión aquí (ej: mi-proyecto-feature)"
+            className="w-full p-2 rounded-lg bg-gray-700 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
-        <ol className="font-mono list-inside list-decimal text-sm/6 text-center sm:text-left">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] font-mono font-semibold px-1 py-0.5 rounded">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
+      </div>
+      <div className="flex-1 overflow-y-auto p-6 space-y-4">
+        {messages.map((msg, index) => (
+          <div key={index} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div className={`max-w-xl p-3 rounded-lg ${msg.role === 'user' ? 'bg-blue-600' : 'bg-gray-700'} prose prose-invert`}>
+              {/* Aquí usamos ReactMarkdown para renderizar la respuesta */}
+              <ReactMarkdown>
+                {msg.content}
+              </ReactMarkdown>
+            </div>
+          </div>
+        ))}
+        {/* Este div invisible nos ayuda a hacer scroll al final */}
+        <div ref={messagesEndRef} />
+      </div>
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+      {/* Barra de Input */}
+      <div className="p-4 border-t border-gray-700">
+        <form onSubmit={handleSubmit} className="flex space-x-2">
+          <input
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            disabled={isLoading || !sessionId.trim()}
+            placeholder={!sessionId.trim() ? "Primero define un ID de Sesión" : "Escribe tu mensaje..."}
+            className="flex-1 p-2 rounded-lg bg-gray-800 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <button
+            type="submit"
+            disabled={isLoading || !sessionId.trim()}
+            className="px-4 py-2 bg-blue-600 rounded-lg hover:bg-blue-700 disabled:bg-gray-500 disabled:cursor-not-allowed"
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
-        </div>
-      </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+            {isLoading ? "Enviando..." : "Enviar"}
+          </button>
+        </form>
+      </div>
     </div>
   );
 }
